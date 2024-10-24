@@ -1,0 +1,42 @@
+version: 0.2
+
+env:
+  git-credential-helper: yes
+phases:
+  install:
+    runtime-versions:
+      nodejs: 18
+    commands:
+      - echo Entered the install phase...
+      - npm --version
+  pre_build:
+    commands:
+      - docker version
+      - echo Logging in to Amazon ECR...
+      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
+      - CURRDATE=$(date +'%Y-%m-%d')
+      - export DOCKER_BUILDKIT=1
+      - docker pull $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/itemku-next:itemku-astro-vue || true
+  build:
+    commands:
+      - echo Build started on `date` for $CODEBUILD_SOURCE_REPO_URL using $CODEBUILD_RESOLVED_SOURCE_VERSION
+      - export COMMIT_ID=$CODEBUILD_RESOLVED_SOURCE_VERSION
+      - >
+        docker build --cache-from $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/itemku-next:itemku-astro-vue
+        -f deployment-script/codebuild/build.Dockerfile 
+        --build-arg port=80 .
+        --tag $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/itemku-next:itemku-astro-vue-${CURRDATE}-$CODEBUILD_RESOLVED_SOURCE_VERSION
+        --tag $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/itemku-next:itemku-astro-vue
+  post_build:
+    commands:
+      - echo Build completed on `date`
+      - echo Pushing the Docker image...
+      - docker push -a $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/itemku-next
+      - echo Writing image definitions file...
+      - printf '[{"name":"app","imageUri":"%s"}]' $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/itemku-next:itemku-astro-vue-${CURRDATE}-$CODEBUILD_RESOLVED_SOURCE_VERSION > imagedefinitions.json
+artifacts:
+  files: imagedefinitions.json
+cache:
+  paths:
+    - '/root/.yarn-cache/**/*'
+    - 'node_modules/**/*'

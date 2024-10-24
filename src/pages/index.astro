@@ -1,0 +1,329 @@
+---
+// This is Astro's frontmatter
+// here you can write regular TypeScript or JavaScript
+// It will only run on the server and never executes client-side
+import ApiHelper from "@/utils/api";
+import type { ILandingPageProps, ILandingPaageLink } from "@/types/landing-page";
+import { productListHelper } from "@/utils/product-helper";
+import { isUserAgentMobile, replaceUndefinedPropsToNull, shuffle } from "@/utils/common-helper";
+import { gameInfoHelper } from "@/utils/game-helper";
+import { DEFAULT_LOCALE_CODE, LANGUAGE_CODE, REGION_CODE, type IRegionData } from "@/types/region";
+import type { IGame, IGameInfoItemType } from "@/types/game";
+import type { IRawItemInfo } from "@/types/item-info";
+import { SEO_BOTTOM_CONTENT_TYPE } from "@/types/seo";
+import type { IApiForeignExchangeRate } from "@/types/foreign-exchange";
+import { CURRENCY_CODE, type ICurrencySymbol, type ICurrencySymbolResponse } from "@/types/currency";
+import { MONTH_NAME } from "@/constants/date";
+import type { IProduct } from "@/types/product";
+import LandingPageTemplate from "@/components/template/landing-page/desktop/index.vue";
+import LandingPageMobileTemplate from "@/components/template/landing-page/mobile/index.vue";
+
+export const prerender = false;
+
+const landingPageProps: ILandingPageProps = {
+  landingPage: undefined,
+  products: [],
+  gameInfo: undefined,
+  productsPage: undefined,
+  productsPerPage: undefined,
+  productsAllCount: undefined,
+  isBot: false,
+  languageCode: 'id',
+  countryCode: 'ID',
+  seoBottomContent: undefined,
+  exchangeRate: undefined,
+  regionData: undefined,
+  isUsingNewSeoPage: false,
+  currencySymbol: undefined,
+  seoParams: undefined,
+  maxSellerRating: 0,
+  countSellerRating: 0,
+  relatedItemTypePageLinks: [],
+  relatedItemInfoPageLinks: [],
+  relatedGameIDPageLinks: [],
+  itemType: undefined,
+  priceInfos: [],
+  configReducersReplica: undefined,
+  isMobile: false,
+};
+
+
+let userRegionData = {
+  default_language_code: LANGUAGE_CODE.ID,
+  default_locale_id: DEFAULT_LOCALE_CODE.INDONESIA,
+  country_code: REGION_CODE.INDONESIA,
+  country_currency: CURRENCY_CODE.INDONESIA,
+};
+
+const generateRating = (products: IProduct[]) => {
+  let maxSellerRating = 0;
+  let countSellerRating = 0;
+
+  for (const product of products) {
+    if (product.seller_rating) {
+      if (product.seller_rating >= maxSellerRating) {
+        if (maxSellerRating !== product.seller_rating) {
+          countSellerRating = 0;
+        }
+        maxSellerRating = product.seller_rating || 0;
+        countSellerRating += product.seller_rating_count || 0;
+      }
+    }
+  }
+
+  return { maxSellerRating, countSellerRating };
+};
+
+const landingPageParams = {
+  country_code: "ID",
+  uri: "welkin-genshin",
+  // country_code: "US",
+  // uri: "sung-jin-woo-anime-vanguard",
+};
+
+const landingPageResp = await ApiHelper.get('/v1/landing-page', landingPageParams);
+
+if (landingPageResp && landingPageResp.success && landingPageResp.data.data[0]) {
+  const landingPageData = landingPageResp.data.data[0];
+  landingPageProps.landingPage = landingPageData;
+
+  const productParams = {
+    is_include_game: 1,
+    is_include_item_type: 1,
+    is_include_item_info_group: 0,
+    is_include_order_record: 1,
+    is_from_web: 1,
+    exclude_sharing_account_eligible: 1,
+    is_include_upselling_product: 1,
+    use_simple_pagination: 1,
+    is_auto_delivery_first: 1,
+    is_with_promotion: 1,
+    is_include_instant_delivery: 1,
+    is_default_product_list: 1,
+    is_enough_stock: 1,
+    page: 1,
+    per_page: 48,
+    sort: 'popular',
+    game_id: landingPageData.game_id || undefined,
+    item_type_id: landingPageData.item_type_id || undefined,
+    item_info_id: landingPageData.item_info_id || undefined,
+    is_exclusive: false,
+    country_codes: ['ID'],
+  };
+
+  const [
+    configResp,
+    productResp,
+    gameInfoResp,
+  ] = await Promise.all([
+    ApiHelper.get('/v1/config'),
+    ApiHelper.get('/v1/product', productParams),
+    ApiHelper.get('/v1/product/game-info', { game_id: landingPageData.game_id }),
+  ]);
+
+  landingPageProps.configReducersReplica = {
+    configList: configResp.data.data,
+    configByFeature: {},
+    lastUpdate: 0,
+    constant: {},
+  };
+
+  landingPageProps.products = productListHelper(productResp?.data?.data ?? [], landingPageProps.configReducersReplica, REGION_CODE.INDONESIA)?.map((product) => replaceUndefinedPropsToNull(product)) ?? [];
+  landingPageProps.productsPage = productResp?.data?.current_page;
+  landingPageProps.productsPerPage = productResp?.data?.item_per_page;
+  landingPageProps.productsAllCount = productResp?.data?.total_item;
+
+  const sellerRating = generateRating(landingPageProps.products);
+  landingPageProps.maxSellerRating = sellerRating.maxSellerRating;
+  landingPageProps.countSellerRating = sellerRating.countSellerRating;
+
+  let currentItemType: IGameInfoItemType | undefined;
+
+  if (gameInfoResp?.success && gameInfoResp?.data) {
+    const gameInfoData = gameInfoHelper(gameInfoResp.data);
+    landingPageProps.gameInfo = gameInfoData;
+    
+    const sameGenreGameResp = await ApiHelper.get('/v1/product/genre/game-list', { genre_id: gameInfoData.genre?.id || 0, per_page: 100 });
+    
+    const sameGenreGamesData: IGame[] = sameGenreGameResp?.data?.data?.map((genre: {game: IGame}) => genre.game) || [];
+
+    // related game links
+    currentItemType = gameInfoData.item_type.find((itemType) => itemType.id === landingPageData.item_type_id);
+
+    if (currentItemType && sameGenreGamesData.length > 0) {
+      // landingPageProps.sameGenreGames = sameGenreGamesData;
+
+      // Pick n random games
+      const otherGames = shuffle(sameGenreGamesData).slice(0, 5);
+      const sameGenreItemInfoResps = await Promise.all(otherGames.map(async (game) => ApiHelper.get('/v1/product/monthly-top-item-info', { game_id: game.id })));
+
+      let sameGenreItemInfosData: IRawItemInfo[] = [];
+      for (const sameGenreItemInfoResp of sameGenreItemInfoResps) {
+        sameGenreItemInfosData = [...sameGenreItemInfosData, ...sameGenreItemInfoResp.data.data.map((top: {item_info: IRawItemInfo}) => top.item_info)];
+      }
+
+      sameGenreItemInfosData = shuffle(sameGenreItemInfosData).slice(0, 20);
+      // landingPageProps.sameGenreItemInfos = sameGenreItemInfosData;
+
+      const relatedGameIDLinksData: ILandingPaageLink[] = [];
+      if (sameGenreItemInfosData && sameGenreGamesData) {
+        for (const itemInfo of sameGenreItemInfosData) {
+          const game = sameGenreGamesData.find((g) => g.id === itemInfo.game_id);
+          if (!game) continue;
+
+          relatedGameIDLinksData.push({ name: itemInfo.name + ' ' + game.name, href: '' });
+        }
+      }
+      landingPageProps.relatedGameIDPageLinks = relatedGameIDLinksData;
+    }
+
+    const seoBottomContentResp = await ApiHelper.get('/v1/seo-bottom-content', {
+      game_id: gameInfoData.game.game_id,
+      item_type_id: landingPageData.item_type_id,
+      item_info_id: landingPageData.item_info_id,
+      page_type: SEO_BOTTOM_CONTENT_TYPE.LANDING_PAGE_GENERATOR,
+      is_active: true,
+      country_code: 'ID',
+    });
+    landingPageProps.seoBottomContent = seoBottomContentResp.data.data[0];
+
+    const currentItemInfo = currentItemType?.item_info.find((itemInfo) => itemInfo.id === landingPageData.item_info_id);
+    const currentDate = new Date();
+    landingPageProps.seoParams = {
+      item_type: currentItemType?.name || '',
+      game_name: gameInfoData.game.game_name,
+      item_info: currentItemInfo?.name || '',
+      month: MONTH_NAME[currentDate.getMonth()],
+      year: `${currentDate.getFullYear()}`,
+      seo_name: landingPageData.game_id.toString(),
+    };
+  }
+
+  const [expansionCountry, currencySymbol]: [any, ICurrencySymbolResponse | undefined] = await Promise.all([
+    ApiHelper.get('/v1/expansion-country', { country_code: userRegionData.country_code }),
+    ApiHelper.get('/v1/currency/detail'),
+  ]);
+  const regionData = expansionCountry?.data[0];
+
+  const foreignExchangeRateParams = {
+    source_currency: regionData?.country_currency || 'IDR',
+    target_currency: 'IDR',
+  };
+
+  const relatedLandingPageCountParams = {
+    country_code: userRegionData.country_code,
+    game_id: landingPageData.game_id,
+    item_type_id: landingPageData.item_type_id,
+    per_page: 1,
+  };
+
+  const [
+    currencyExchangeRateResp,
+    relatedLandingPageCountResp,
+  ] = await Promise.all([
+    ApiHelper.get('/v1/foreign-exchange/rate', foreignExchangeRateParams),
+    ApiHelper.get('/v1/landing-page', relatedLandingPageCountParams),
+  ]);
+
+  let globalProps = {
+    exchangeRate: { source_currency: 'IDR', target_currency: 'IDR', exchange_rate: 1 } as IApiForeignExchangeRate,
+    regionData: { country_name: 'Indonesia', default_language_code: 'ID', country_code: REGION_CODE.INDONESIA } as IRegionData,
+    currencySymbolList: undefined as ICurrencySymbol | undefined,
+  };
+
+  if (regionData && currencyExchangeRateResp?.data[0]) {
+    globalProps = {
+      exchangeRate: currencyExchangeRateResp?.data[0],
+      regionData,
+      currencySymbolList: currencySymbol?.listSymbol ?? undefined,
+    };
+  }
+
+  landingPageProps.exchangeRate = globalProps.exchangeRate;
+  landingPageProps.regionData = globalProps.regionData;
+  landingPageProps.currencySymbol = globalProps.currencySymbolList;
+
+  // Count how many data
+  const relatedLandingPagesCount = relatedLandingPageCountResp?.data.total_item ?? 0;
+  const perPage = 20;
+  
+  // Random by page
+  const page = Math.ceil(Math.random() * Math.ceil(relatedLandingPagesCount / perPage));
+  const relatedLandingPageResp = await ApiHelper.get('/v1/landing-page', {
+    country_code: userRegionData.country_code,
+    game_id: landingPageData.game_id,
+    item_type_id: landingPageData.item_type_id,
+    page: page,
+    per_page: perPage,
+  });
+
+  let relatedLandingPagesData = [];
+  if (relatedLandingPageResp?.data?.data?.length > 0) {
+    relatedLandingPagesData = relatedLandingPageResp.data.data;
+  }
+
+  // Remove duplicate landing pages having same item info and set item info
+  relatedLandingPagesData = relatedLandingPagesData.filter((relatedPage: {uri: string}) => {
+    if (landingPageData.uri === relatedPage.uri) { return false; }
+    return true;
+  });
+
+  let relatedItemInfoPageLinksData: ILandingPaageLink[] = [];
+  if (relatedLandingPagesData && relatedLandingPagesData.length > 0) {
+    for (const relatedLandingPage of relatedLandingPagesData) {
+      const foundItemInfo = currentItemType?.item_info.find(((itemInfo) => itemInfo.id === relatedLandingPage.item_info_id));
+      if (foundItemInfo) {
+        relatedItemInfoPageLinksData.push({ name: foundItemInfo.name, href: '' });
+      }
+    }
+  }
+  landingPageProps.relatedItemInfoPageLinks = relatedItemInfoPageLinksData;
+  landingPageProps.itemType = currentItemType;
+
+  let relatedItemTypeLinksData: ILandingPaageLink[] = [];
+  if (landingPageProps.gameInfo) {
+    const gameInfo = landingPageProps.gameInfo;
+    for (const itemType of gameInfo.item_type) {
+      relatedItemTypeLinksData.push({ name: itemType.name, href: '' });
+    }
+  }
+  landingPageProps.relatedItemTypePageLinks = relatedItemTypeLinksData;
+
+  const averagePrice = landingPageProps.products.reduce((sum, product) => sum + product.price, 0) / landingPageProps.products.length;
+  const cheapestPrice = landingPageProps.products.reduce((minPrice, product) => Math.min(minPrice, product.price), Infinity);
+  const mostExpensivePrice = landingPageProps.products.reduce((maxPrice, product) => Math.max(maxPrice, product.price), -Infinity);
+
+  landingPageProps.priceInfos = [
+    { 
+      name: `Harga Rata-Rata ${landingPageProps.itemType?.name ?? ''} se ${landingPageProps.regionData.country_name ?? ''}`,
+      price: averagePrice,
+    },
+    {
+      name: `Estimasi Harga ${currentItemType?.name || ''} Termurah se ${landingPageProps.regionData.country_name}`,
+      price: cheapestPrice, 
+    },
+    { 
+      name: `Estimasi Harga ${currentItemType?.name || ''} Termahal se ${landingPageProps.regionData.country_name}`,
+      price: mostExpensivePrice,
+    },
+  ];
+}
+
+const userAgent = Astro.request.headers.get('user-agent') || '';
+
+landingPageProps.isMobile = isUserAgentMobile(userAgent);
+
+const title = "Hello World!";
+---
+
+<html>
+  <head>
+    <!-- Astro uses a JSX-like syntax in it's body -->
+    <title>{title}</title>
+  </head>
+  <body>
+    <main>
+      {!landingPageProps.isMobile ? <LandingPageTemplate landingPageProps={landingPageProps} /> : <LandingPageMobileTemplate landingPageProps={landingPageProps} />}
+    </main>
+  </body>
+</html>
